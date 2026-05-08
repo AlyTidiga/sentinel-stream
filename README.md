@@ -362,3 +362,49 @@ GitHub : https://github.com/AlyTidiga/sentinel-stream
 
 Stack : Kafka · Python · XGBoost · MLflow · FastAPI · Docker · Prometheus · Grafana
 
+
+---
+
+## 11. MLflow — Traçabilite et gouvernance du modele
+
+### Pourquoi MLflow est indispensable en contexte bancaire
+
+En banque, chaque decision prise par un modele doit etre auditable.
+Si un regulateur demande : quel modele a bloque cette transaction le 15 mars a 14h23 ?
+Vous devez pouvoir repondre precisement.
+MLflow est le registre qui rend cela possible.
+
+### Ce que MLflow fait dans Sentinel Stream
+
+**1. Tracking des experiences**
+Chaque entrainement du modele XGBoost est enregistre automatiquement :
+- Hyperparametres : n_estimators, max_depth, learning_rate, scale_pos_weight
+- Metriques : AUC-ROC 0.9808, F1-Score 0.7708, Precision 0.8043, Recall 0.7400
+- Matrice de confusion : TN, FP, FN, TP
+- Artefact : le modele entraine
+
+**2. Versioning des modeles**
+Chaque modele est versionne. En production, on sait exactement
+quelle version du modele a pris quelle decision et a quel moment.
+C'est l'auditabilite reglementaire exigee par BCBS 239.
+
+**3. Comparaison des runs**
+L'interface MLflow sur http://localhost:5000 permet de comparer
+visuellement tous les entrainements et de choisir le meilleur modele.
+
+### Comment acceder a MLflow
+
+Ouvrez http://localhost:5000 dans votre navigateur.
+Vous verrez l'experience sentinel-fraud-detection avec tous les runs.
+Cliquez sur un run pour voir tous les details : parametres, metriques, artefacts.
+
+### Lien avec la conformite bancaire
+
+| Exigence reglementaire | Solution Sentinel Stream |
+|---|---|
+| Quel modele a decide ? | MLflow Registry — version exacte du modele |
+| Quand a-t-il ete entraine ? | MLflow — timestamp de chaque run |
+| Avec quelles donnees ? | MLflow — artefacts et metadata |
+| Quelles sont ses performances ? | MLflow — AUC, F1, precision, recall |
+| Qui l'a valide ? | MLflow — stages Staging vers Production |
+
