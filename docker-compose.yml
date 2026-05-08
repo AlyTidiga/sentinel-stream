@@ -1,0 +1,204 @@
+networks:
+  sentinel-net:
+    driver: bridge
+
+volumes:
+  kafka-data-1:
+  redis-data:
+  mlflow-data:
+  prometheus-data:
+  grafana-data:
+
+services:
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: sentinel-zookeeper
+    networks: [sentinel-net]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_HEAP_OPTS: "-Xmx256m -Xms128m"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: sentinel-kafka
+    networks: [sentinel-net]
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data-1:/var/lib/kafka/data
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
+      KAFKA_LOG_RETENTION_HOURS: 24
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    container_name: sentinel-schema-registry
+    networks: [sentinel-net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_HEAP_OPTS: "-Xmx256m -Xms128m"
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: sentinel-kafka-ui
+    networks: [sentinel-net]
+    depends_on: [kafka, schema-registry]
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: sentinel
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: sentinel-kafka-init
+    networks: [sentinel-net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: /bin/bash
+    command: -c "sleep 5 && kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic txn-raw --partitions 6 --replication-factor 1 && kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic fraud-alerts --partitions 3 --replication-factor 1 && kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic txn-dead-letter --partitions 3 --replication-factor 1 && echo 'Topics OK' && kafka-topics --list --bootstrap-server kafka:29092"
+
+  flink-jobmanager:
+    image: flink:1.18-scala_2.12-java11
+    container_name: sentinel-flink-jobmanager
+    networks: [sentinel-net]
+    ports:
+      - "8082:8081"
+    command: jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: 1024m
+        taskmanager.memory.process.size: 1024m
+        taskmanager.numberOfTaskSlots: 2
+        parallelism.default: 2
+        state.backend: filesystem
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        execution.checkpointing.interval: 30000
+        execution.checkpointing.mode: EXACTLY_ONCE
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/overview"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  flink-taskmanager:
+    image: flink:1.18-scala_2.12-java11
+    container_name: sentinel-flink-taskmanager
+    networks: [sentinel-net]
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: 1024m
+        taskmanager.memory.process.size: 1024m
+        taskmanager.numberOfTaskSlots: 2
+        parallelism.default: 2
+        state.backend: filesystem
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        execution.checkpointing.interval: 30000
+        execution.checkpointing.mode: EXACTLY_ONCE
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: sentinel-redis
+    networks: [sentinel-net]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.10.0
+    container_name: sentinel-mlflow
+    networks: [sentinel-net]
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/mlflow
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+
+  prometheus:
+    image: prom/prometheus:v2.49.0
+    container_name: sentinel-prometheus
+    networks: [sentinel-net]
+    profiles: [monitoring]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:10.3.0
+    container_name: sentinel-grafana
+    networks: [sentinel-net]
+    profiles: [monitoring]
+    depends_on: [prometheus]
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: sentinel2025
+      GF_USERS_ALLOW_SIGN_UP: "false"
+
+  ml-api:
+    image: sentinel-ml-api:latest
+    container_name: sentinel-ml-api
+    networks: [sentinel-net]
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
